@@ -48,7 +48,7 @@ void loop() {
 // Connects to WiFi and waits until established.
 void connectToWifi() {
   Serial.print("Connecting to Wifi");
-  while (WiFi.begin(WIFI_SSID, WIFI_PASS) != WL_CONNECTED) {
+  while (WiFi.begin(WIFI_NETWORK, WIFI_PASSWORD) != WL_CONNECTED) {
     Serial.print(".");
     delay(5000);
   }
