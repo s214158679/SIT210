@@ -1,0 +1,200 @@
+// SIT210 - Embedded Systems Development
+// Task 3.2C - MQTT Publish Subscribe
+
+#include <WiFiNINA.h>
+#include <ArduinoMqttClient.h>
+
+// Pin definitions
+#define TRIG_PIN  2
+#define ECHO_PIN  3
+#define LED1_PIN  4
+#define LED2_PIN  5
+
+// WiFi credentials
+const char* WIFI_NETWORK = "removed";
+const char* WIFI_PASS = "removed";
+
+// MQTT broker settings
+const char* MQTT_BROKER = "broker.emqx.io";
+const int   MQTT_PORT   = 1883;
+const char* TOPIC_WAVE  = "ES/Wave/214158679";
+const char* TOPIC_PAT   = "ES/Pat/214158679";
+const char* MQTT_ID   = "214158679";
+
+// Gesture thresholds
+const int          CLOSE_DISTANCE = 20;    // cm - hand considered close
+const unsigned long WAVE_MAX_TIME = 500;   // ms - max hold time for wave
+const unsigned long PAT_MIN_TIME  = 2000;  // ms - min hold time for pat
+const unsigned long GESTURE_COOLDOWN = 1000; // ms - delay between gestures
+
+// State tracking
+unsigned long handDetectedTime = 0;
+unsigned long lastGestureTime  = 0;
+bool handPresent = false;
+bool ledsOn      = false;
+
+WiFiClient wifiClient;
+MqttClient mqtt(wifiClient);
+
+// connectToWifi()
+// Connects to Wifi, waits until established.
+void connectToWifi() {
+  Serial.print("Connecting to WiFi");
+  while (WiFi.begin(WIFI_NETWORK, WIFI_PASS) != WL_CONNECTED) {
+    Serial.print(".");
+    delay(5000);
+  }
+  Serial.println(" connected.");
+}
+
+// connectToMQTT()
+// Connects to EMQX broker, waits until established.
+void connectToMQTT() {
+  Serial.print("Connecting to MQTT");
+  while (!mqtt.connect(MQTT_BROKER, MQTT_PORT)) {
+    Serial.print(".");
+    delay(2000);
+  }
+  Serial.println(" connected.");
+}
+
+// readDistance()
+// Triggers ultrasonic sensor,returns distance in cm.
+int readDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  int distance = duration * 0.034 / 2;
+  // added this for false sensor 0cm readings
+  if (duration == 0 || distance < 5) return 999;
+  if (distance > 400) return 999;
+  return distance;
+}
+
+// publishMessage()
+// Publishes a message to the given MQTT
+void publishMessage(const char* topic, const char* message) {
+  mqtt.beginMessage(topic);
+  mqtt.print(message);
+  mqtt.endMessage();
+  Serial.print("Published to ");
+  Serial.print(topic);
+  Serial.print(": ");
+  Serial.println(message);
+}
+
+// turnLedsOn()
+// Sets both LEDs HIGH and updates
+void turnLedsOn() {
+  ledsOn = true;
+  digitalWrite(LED1_PIN, HIGH);
+  digitalWrite(LED2_PIN, HIGH);
+  Serial.println("LEDs ON.");
+}
+
+// turnLedsOff()
+// Sets both LEDs LOW and updates state.
+void turnLedsOff() {
+  ledsOn = false;
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(LED2_PIN, LOW);
+  Serial.println("LEDs OFF.");
+}
+
+// onMQTTMessage()
+// Callback fired when a message is received on a subscribed topic
+// ES/Wave turns LEDs on, ES/Pat turns LEDs off.
+void onMQTTMessage(int messageSize) {
+  String topic   = mqtt.messageTopic();
+  String message = "";
+  while (mqtt.available()) {
+    message += (char)mqtt.read();
+  }
+  Serial.print("Received on ");
+  Serial.print(topic);
+  Serial.print(": ");
+  Serial.println(message);
+
+  if (topic == TOPIC_WAVE) {
+    turnLedsOn();
+  } else if (topic == TOPIC_PAT) {
+    turnLedsOff();
+  }
+}
+
+// checkGesture()
+// Reads distance and classifies gesture based on hold time.
+// Wave: hand moves away within WAVE_MAX_TIME.
+// Pat: hand held close for at least PAT_MIN_TIME.
+// Ignores input during cooldown period to avoid repeat triggers.
+void checkGesture() {
+  if (millis() - lastGestureTime < GESTURE_COOLDOWN) return;
+
+  int distance = readDistance();
+
+  if (distance < CLOSE_DISTANCE && !handPresent) {
+    handPresent      = true;
+    handDetectedTime = millis();
+    Serial.print("Hand detected at ");
+    Serial.print(distance);
+    Serial.println("cm.");
+  }
+
+  static int missCount = 0; // counts consecutive out-of-range readings
+
+  if (handPresent) {
+    if (distance >= CLOSE_DISTANCE) {
+      missCount++;
+      // added to stop serial spam.
+      if (missCount >= 5) { // require 5 consecutive misses before releasing
+        unsigned long heldTime = millis() - handDetectedTime;
+        handPresent     = false;
+        lastGestureTime = millis();
+        missCount       = 0;
+
+        Serial.print("Hand removed. Hold time: ");
+        Serial.print(heldTime);
+        Serial.println("ms.");
+
+        if (heldTime <= WAVE_MAX_TIME) {
+          publishMessage(TOPIC_WAVE, MQTT_ID);
+          Serial.println("Wave detected.");
+        } else if (heldTime >= PAT_MIN_TIME) {
+          publishMessage(TOPIC_PAT, MQTT_ID);
+          Serial.println("Pat detected.");
+        } else {
+          Serial.println("Gesture unclear - ignored.");
+        }
+      }
+    } else {
+      missCount = 0; // hand still present, reset miss counter
+    }
+  }
+}
+
+// setup()
+// Configures pins, connects to WiFi and MQTT, registers callback.
+void setup() {
+  Serial.begin(9600);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  turnLedsOff();
+  connectToWifi();
+  connectToMQTT();
+  mqtt.onMessage(onMQTTMessage);
+  mqtt.subscribe(TOPIC_WAVE);
+  mqtt.subscribe(TOPIC_PAT);
+  Serial.println("System ready.");
+}
+
+// loop()
+// Polls MQTT and checks for gestures continuously.
+void loop() {
+  mqtt.poll();
+  checkGesture();
+}
